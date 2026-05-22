@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦊 靈狐語音 PoC — Gemini Live</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f0f0f;--surface:#1a1a1a;--surface2:#242424;
+  --border:rgba(255,255,255,.1);--text:#e8e7e1;--sub:#888;
+  --accent:#f97316;--green:#22c55e;--red:#ef4444;--blue:#3b82f6;
+}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;
+  padding:28px;width:100%;max-width:480px;display:flex;flex-direction:column;gap:20px}
+h1{font-size:1.3rem;font-weight:700;display:flex;align-items:center;gap:8px}
+.status-row{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--sub)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--sub);transition:background .3s}
+.dot.connected{background:var(--green)}
+.dot.recording{background:var(--accent);animation:pulse 1s infinite}
+.dot.error{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+.viz{height:60px;background:var(--surface2);border-radius:10px;display:flex;
+  align-items:center;justify-content:center;gap:3px;padding:0 16px;overflow:hidden}
+.bar{width:4px;border-radius:2px;background:var(--accent);transition:height .05s;min-height:3px}
+
+.transcript{background:var(--surface2);border-radius:10px;padding:14px;min-height:120px;
+  max-height:240px;overflow-y:auto;font-size:14px;line-height:1.7;
+  display:flex;flex-direction:column;gap:8px}
+.msg{padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5}
+.msg.user{background:rgba(249,115,22,.15);color:#fed7aa;align-self:flex-end;max-width:85%}
+.msg.ai{background:rgba(59,130,246,.12);color:#bfdbfe;align-self:flex-start;max-width:85%}
+.msg.system{color:var(--sub);font-size:11px;align-self:center;font-style:italic}
+
+.controls{display:flex;gap:10px;align-items:center}
+.btn{padding:10px 20px;border-radius:10px;border:none;font-size:14px;font-weight:600;
+  cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:6px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#ea6d0e}
+.btn-primary:disabled{background:var(--surface2);color:var(--sub);cursor:not-allowed}
+.btn-stop{background:var(--red);color:#fff}
+.btn-stop:hover{background:#dc2626}
+.btn-stop:disabled{background:var(--surface2);color:var(--sub);cursor:not-allowed}
+.btn-secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{background:#2e2e2e}
+
+.config{background:var(--surface2);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.config label{font-size:12px;color:var(--sub);margin-bottom:2px;display:block}
+.config input,.config textarea,.config select{
+  width:100%;background:var(--surface);border:1px solid var(--border);
+  border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;
+  font-family:inherit;resize:none;outline:none}
+.config input:focus,.config textarea:focus,.config select:focus{border-color:var(--accent)}
+.config textarea{min-height:70px}
+details>summary{cursor:pointer;font-size:13px;color:var(--sub);user-select:none;padding:2px 0}
+details>summary:hover{color:var(--text)}
+.audio-indicator{font-size:11px;color:var(--sub);text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <div>
+    <h1>🦊 靈狐語音 <span style="font-size:.8rem;color:var(--sub);font-weight:400">Gemini Live PoC</span></h1>
+    <div class="status-row">
+      <div class="dot" id="dot"></div>
+      <span id="status-text">未連線</span>
+    </div>
+  </div>
+
+  <div class="viz" id="viz">
+    <div style="color:var(--sub);font-size:12px" id="viz-placeholder">等待麥克風…</div>
+  </div>
+
+  <div class="transcript" id="transcript">
+    <div class="msg system">按「開始對話」並允許麥克風，即可與靈狐語音對話。</div>
+  </div>
+
+  <div class="controls">
+    <button class="btn btn-primary" id="btn-start" onclick="startSession()">🎙️ 開始對話</button>
+    <button class="btn btn-stop" id="btn-stop" onclick="stopSession()" disabled>⏹ 結束</button>
+    <button class="btn btn-secondary" onclick="clearTranscript()">🗑</button>
+  </div>
+
+  <div class="audio-indicator" id="audio-indicator"></div>
+
+  <details>
+    <summary>⚙️ 設定</summary>
+    <div class="config" style="margin-top:8px">
+      <div>
+        <label>API Key</label>
+        <input type="password" id="api-key" placeholder="AIza...">
+      </div>
+      <div>
+        <label>系統提示</label>
+        <textarea id="system-prompt">你是靈狐小i，Tyler 的 AI 助手。用繁體中文回答，語氣親切自然，回答簡潔（2-3句）。</textarea>
+      </div>
+      <div>
+        <label>模型</label>
+        <select id="model-select">
+          <option value="models/gemini-2.5-flash-native-audio-latest">gemini-2.5-flash-native-audio (最新)</option>
+          <option value="models/gemini-2.5-flash-native-audio-preview-09-2025">gemini-2.5-flash-native-audio-preview</option>
+        </select>
+      </div>
+    </div>
+  </details>
+</div>
+
+<script>
+// ── State ──
+let ws = null;
+let mediaStream = null;
+let audioContext = null;
+let processor = null;
+let analyser = null;
+let vizBars = [];
+let vizRaf = null;
+let audioQueue = [];
+let isPlayingAudio = false;
+let currentAiText = '';
+let currentUserText = '';
+let sessionActive = false;
+
+// ── UI helpers ──
+function setStatus(state, text) {
+  const dot = document.getElementById('dot');
+  dot.className = 'dot ' + state;
+  document.getElementById('status-text').textContent = text;
+}
+
+function addMessage(role, text) {
+  const t = document.getElementById('transcript');
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  t.appendChild(div);
+  t.scrollTop = t.scrollHeight;
+  return div;
+}
+
+function clearTranscript() {
+  const t = document.getElementById('transcript');
+  t.innerHTML = '<div class="msg system">已清除。</div>';
+}
+
+function buildViz() {
+  const viz = document.getElementById('viz');
+  const ph = document.getElementById('viz-placeholder');
+  if(ph) ph.remove();
+  vizBars = [];
+  viz.innerHTML = '';
+  for(let i=0;i<32;i++){
+    const b = document.createElement('div');
+    b.className = 'bar';
+    b.style.height = '3px';
+    viz.appendChild(b);
+    vizBars.push(b);
+  }
+}
+
+function animateViz() {
+  if(!analyser || !vizBars.length){ vizRaf = requestAnimationFrame(animateViz); return; }
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+  const step = Math.floor(data.length / vizBars.length);
+  vizBars.forEach((b,i) => {
+    const v = data[i*step] || 0;
+    b.style.height = Math.max(3, (v/255)*54) + 'px';
+    b.style.opacity = 0.5 + (v/255)*0.5;
+  });
+  vizRaf = requestAnimationFrame(animateViz);
+}
+
+// ── Audio helpers ──
+function float32ToInt16(f32) {
+  const i16 = new Int16Array(f32.length);
+  for(let i=0;i<f32.length;i++) i16[i] = Math.max(-32768, Math.min(32767, f32[i]*32768));
+  return i16;
+}
+
+function arrayBufferToBase64(buf) {
+  let bin = '';
+  const bytes = new Uint8Array(buf);
+  for(let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function base64ToFloat32(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  const i16 = new Int16Array(bytes.buffer);
+  const f32 = new Float32Array(i16.length);
+  for(let i=0;i<i16.length;i++) f32[i] = i16[i]/32768;
+  return f32;
+}
+
+async function playAudioChunk(f32, sampleRate) {
+  if(!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = audioContext.createBuffer(1, f32.length, sampleRate);
+  buf.copyToChannel(f32, 0);
+  const src = audioContext.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioContext.destination);
+  return new Promise(resolve => {
+    src.onended = resolve;
+    src.start();
+  });
+}
+
+async function drainAudioQueue() {
+  if(isPlayingAudio) return;
+  isPlayingAudio = true;
+  while(audioQueue.length > 0) {
+    const {f32, sr} = audioQueue.shift();
+    await playAudioChunk(f32, sr);
+  }
+  isPlayingAudio = false;
+}
+
+// ── WebSocket session ──
+async function startSession() {
+  const apiKey = document.getElementById('api-key').value.trim() || window.__GEMINI_KEY__ || '__GEMINI_KEY_PLACEHOLDER__';
+  if(!apiKey){ addMessage('system','請先在設定中填入 API Key'); return; }
+
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-stop').disabled = false;
+  setStatus('connecting','連線中…');
+
+  // Setup audio context + mic
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 }, video: false });
+  } catch(e) {
+    addMessage('system','❌ 無法存取麥克風：' + e.message);
+    setStatus('error','麥克風錯誤');
+    resetUI();
+    return;
+  }
+
+  audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const source = audioContext.createMediaStreamSource(mediaStream);
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize = 64;
+  source.connect(analyser);
+  buildViz();
+  animateViz();
+
+  processor = audioContext.createScriptProcessor(4096, 1, 1);
+  source.connect(processor);
+  processor.connect(audioContext.destination);
+
+  const model = document.getElementById('model-select').value;
+  const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    setStatus('connected','已連線，發送設定…');
+    const systemPrompt = document.getElementById('system-prompt').value;
+    const setupMsg = {
+      setup: {
+        model: model,
+        generation_config: {
+          response_modalities: ['AUDIO'],
+          speech_config: { voice_config: { prebuilt_voice_config: { voice_name: 'Aoede' } } }
+        },
+        system_instruction: { parts: [{ text: systemPrompt }] }
+      }
+    };
+    ws.send(JSON.stringify(setupMsg));
+  };
+
+  ws.onmessage = async (event) => {
+    let msg;
+    try {
+      const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
+      msg = JSON.parse(text);
+    } catch { return; }
+
+    // Setup complete
+    if(msg.setupComplete) {
+      setStatus('recording','🎙 聆聽中…');
+      sessionActive = true;
+      addMessage('system','✅ 連線完成，請開口說話！');
+
+      // Start sending mic audio
+      processor.onaudioprocess = (e) => {
+        if(!sessionActive || ws?.readyState !== WebSocket.OPEN) return;
+        const f32 = e.inputBuffer.getChannelData(0);
+        const i16 = float32ToInt16(f32);
+        const b64 = arrayBufferToBase64(i16.buffer);
+        ws.send(JSON.stringify({
+          realtime_input: {
+            media_chunks: [{ mime_type: 'audio/pcm;rate=16000', data: b64 }]
+          }
+        }));
+      };
+    }
+
+    // Server content (AI audio/text response)
+    if(msg.serverContent) {
+      const sc = msg.serverContent;
+
+      // Interrupted
+      if(sc.interrupted) {
+        audioQueue = [];
+        document.getElementById('audio-indicator').textContent = '（被打斷）';
+        return;
+      }
+
+      // Model turn
+      if(sc.modelTurn?.parts) {
+        for(const part of sc.modelTurn.parts) {
+          // Audio
+          if(part.inlineData?.mimeType?.startsWith('audio/')) {
+            const sr = parseInt(part.inlineData.mimeType.match(/rate=(\d+)/)?.[1] || '24000');
+            const f32 = base64ToFloat32(part.inlineData.data);
+            audioQueue.push({f32, sr});
+            drainAudioQueue();
+          }
+          // Text
+          if(part.text) {
+            currentAiText += part.text;
+          }
+        }
+      }
+
+      // Turn complete
+      if(sc.turnComplete) {
+        if(currentAiText) {
+          addMessage('ai', '🦊 ' + currentAiText);
+          currentAiText = '';
+        }
+        document.getElementById('audio-indicator').textContent = '';
+      }
+    }
+
+    // Input transcript (user speech)
+    if(msg.inputTranscript) {
+      const t = msg.inputTranscript.text || '';
+      if(t.trim()) addMessage('user', '👤 ' + t);
+    }
+  };
+
+  ws.onerror = (e) => {
+    setStatus('error','連線錯誤');
+    addMessage('system','❌ WebSocket 錯誤');
+    stopSession();
+  };
+
+  ws.onclose = (e) => {
+    if(sessionActive) {
+      addMessage('system', `連線關閉（code: ${e.code}）`);
+      setStatus('', '已斷線');
+    }
+    sessionActive = false;
+  };
+}
+
+function stopSession() {
+  sessionActive = false;
+  if(ws) { try{ ws.close(); }catch{} ws = null; }
+  if(processor) { try{ processor.disconnect(); }catch{} processor = null; }
+  if(mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream = null; }
+  if(vizRaf) { cancelAnimationFrame(vizRaf); vizRaf = null; }
+  if(audioContext) { try{ audioContext.close(); }catch{} audioContext = null; }
+  analyser = null;
+  audioQueue = [];
+  isPlayingAudio = false;
+  setStatus('','已結束');
+  addMessage('system','🔴 對話已結束。');
+  resetUI();
+}
+
+function resetUI() {
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-stop').disabled = true;
+  const viz = document.getElementById('viz');
+  viz.innerHTML = '<div id="viz-placeholder" style="color:var(--sub);font-size:12px">等待麥克風…</div>';
+  vizBars = [];
+}
+</script>
+</body>
+</html>
