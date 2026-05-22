@@ -1,0 +1,12 @@
+{
+  "name": "fox-voice-poc",
+  "version": "1.0.0",
+  "description": "靈狐語音 PoC — Gemini Live WebSocket",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
